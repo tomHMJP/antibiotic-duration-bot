@@ -1,157 +1,430 @@
+<!-- templates/index.html -->
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>抗菌薬治療期間Bot 音声＋文字入力対応（動作確認版）</title>
-<style>
-  /* 省略せず、前回のCSSをそのまま使ってください */
-  body { font-family: Arial, sans-serif; margin: 2em; background: #fafafa; }
-  button, input[type="text"] {
-    font-size: 1.2em;
-    padding: 0.5em 1em;
-    margin: 0.2em 0;
-  }
-  #status { margin-top: 1em; font-weight: bold; color: #333; }
-  #transcript, #answer { margin-top: 1em; white-space: pre-wrap; background: #fff; padding: 1em; border-radius: 5px; border: 1px solid #ddd; min-height: 4em; }
-  #candidate-list { margin-top: 1em; }
-  #candidate-list button {
-    margin: 0.2em 0;
-    width: 100%;
-    text-align: left;
-    padding: 0.5em;
-    border: 1px solid #ccc;
-    background: #eee;
-    cursor: pointer;
-    border-radius: 4px;
-  }
-  #candidate-list button:hover { background: #ddd; }
-</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>抗菌薬治療期間Bot（音声＋文字入力）</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 2em; background: #fafafa; }
+    h1 { margin: 0 0 0.2em 0; }
+    .muted { color: #666; font-size: 0.95em; line-height: 1.5; }
+    .row { margin: 0.8em 0; }
+    button, input[type="text"] { font-size: 1.05em; padding: 0.55em 0.9em; margin: 0.2em 0; }
+    #status { margin-top: 1em; font-weight: bold; color: #333; }
+    #transcript, #answer {
+      margin-top: 0.6em; white-space: pre-wrap; background: #fff;
+      padding: 1em; border-radius: 10px; border: 1px solid #ddd; min-height: 3.2em;
+    }
+    #candidate-list { margin-top: 0.6em; }
+    #candidate-list button {
+      display: block; width: 100%; text-align: left;
+      padding: 0.65em 0.75em; border: 1px solid #ccc;
+      background: #eee; cursor: pointer; border-radius: 10px;
+    }
+    #candidate-list button:hover { background: #e2e2e2; }
+    #candidate-list button.selected { background: #d9ead3; border-color: #6aa84f; }
+    .error { color: #b00020; }
+    .grid { max-width: 720px; }
+
+    /* --- dropdown --- */
+    .input-wrap{
+      position: relative;
+      display: inline-block;
+      width: 100%;
+      max-width: 560px;
+      vertical-align: top;
+    }
+    .input-wrap input{
+      width: 100%;
+      box-sizing: border-box;
+      padding-right: 2.6em; /* ▼ボタン分 */
+    }
+    .dropdown-btn{
+      position:absolute;
+      right: 6px;
+      top: 50%;
+      transform: translateY(-50%);
+      padding: 0.25em 0.55em;
+      border-radius: 10px;
+      border: 1px solid #ccc;
+      background: #eee;
+      cursor: pointer;
+      line-height: 1;
+    }
+    .dropdown-btn:hover{ background:#e2e2e2; }
+
+    .suggestions{
+      position:absolute;
+      top: calc(100% + 6px);
+      left:0;
+      right:0;
+      background:#fff;
+      border:1px solid #ccc;
+      border-radius: 10px;
+      max-height: 320px;
+      overflow:auto;
+      z-index: 1000;
+      box-shadow: 0 10px 24px rgba(0,0,0,0.10);
+    }
+    .suggestions.hidden{ display:none; }
+    .suggestion-item{
+      padding: 0.6em 0.75em;
+      cursor:pointer;
+      border-bottom: 1px solid #eee;
+    }
+    .suggestion-item:last-child{ border-bottom:none; }
+    .suggestion-item:hover,
+    .suggestion-item.active{ background:#eee; }
+  </style>
 </head>
+
 <body>
-<h1>抗菌薬治療期間Bot</h1>
-<p>音声または文字で感染症名を入力し、あいまい検索で候補を提示します。候補を選択すると治療期間の回答を表示します。</p>
+  <div class="grid">
+    <h1>抗菌薬治療期間Bot</h1>
+    <p class="muted">
+      音声または文字で感染症名を入力し、候補を提示します。候補を選択すると推奨治療期間（＋備考）を表示します。
+      音声認識は Chrome / Edge 推奨です。
+    </p>
 
-<button id="btnStart">音声入力開始</button>
-<br />
-<input type="text" id="textInput" placeholder="ここに文字を入力してください" style="width:100%; max-width:500px;" />
-<button id="btnTextSubmit">文字で検索</button>
+    <div class="row">
+      <button id="btnStart" type="button">音声入力開始</button>
+    </div>
 
-<p id="status">準備完了</p>
+    <div class="row">
+      <div class="input-wrap">
+        <input type="text" id="textInput" autocomplete="off"
+               placeholder="ここに文字を入力（例：肺炎）" />
+        <button id="btnDropdown" type="button" class="dropdown-btn" aria-label="疾患一覧を表示">▼</button>
+        <div id="suggestions" class="suggestions hidden" role="listbox"></div>
+      </div>
 
-<h3>入力テキスト</h3>
-<div id="transcript"></div>
+      <button id="btnTextSubmit" type="button">文字で検索</button>
+      <button id="btnClear" type="button">クリア</button>
+    </div>
 
-<h3>候補感染症一覧（選択してください）</h3>
-<div id="candidate-list"></div>
+    <div id="status">準備完了</div>
 
-<h3>選択された感染症の治療期間・回答</h3>
-<div id="answer"></div>
+    <h3>入力テキスト</h3>
+    <div id="transcript"></div>
+
+    <h3>候補感染症（選択してください）</h3>
+    <div id="candidate-list"></div>
+
+    <h3>治療期間・回答</h3>
+    <div id="answer"></div>
+  </div>
 
 <script>
-  window.SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  const recog = window.SpeechRecognition ? new window.SpeechRecognition() : null;
-  if (!recog) {
-    alert('お使いのブラウザは音声認識をサポートしていません。ChromeやEdgeの最新版でご利用ください。');
-  }
-
-  if (recog) {
-    recog.lang = 'ja-JP';
-    recog.interimResults = false;
-    recog.maxAlternatives = 1;
-  }
-
   const btnStart = document.getElementById('btnStart');
   const btnTextSubmit = document.getElementById('btnTextSubmit');
+  const btnClear = document.getElementById('btnClear');
+  const btnDropdown = document.getElementById('btnDropdown');
+
   const textInput = document.getElementById('textInput');
+  const suggestionsEl = document.getElementById('suggestions');
+
   const statusEl = document.getElementById('status');
   const transcriptEl = document.getElementById('transcript');
   const candidateListEl = document.getElementById('candidate-list');
   const answerEl = document.getElementById('answer');
 
-  if (recog) {
-    recog.onstart = () => {
-      statusEl.textContent = '音声認識開始。話してください…';
-      btnStart.disabled = true;
-      btnTextSubmit.disabled = true;
-      textInput.disabled = true;
-    };
-    recog.onerror = e => {
-      statusEl.textContent = `認識エラー: ${e.error}`;
-      btnStart.disabled = false;
-      btnTextSubmit.disabled = false;
-      textInput.disabled = false;
-    };
-    recog.onend = () => {
-      statusEl.textContent = '音声認識終了。';
-      btnStart.disabled = false;
-      btnTextSubmit.disabled = false;
-      textInput.disabled = false;
-    };
-    recog.onresult = e => {
-      const text = e.results[0][0].transcript.trim();
+  // --- speech ---
+  window.SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const recog = window.SpeechRecognition ? new window.SpeechRecognition() : null;
+
+  // --- state ---
+  let allDiseasesCache = null;     // ["疾患名", ...]  A列全件
+  let suggestItems = [];           // dropdown表示中の疾患名
+  let activeSuggestIndex = -1;
+  let fetchSeq = 0;
+
+  function setStatus(msg, isError=false){
+    statusEl.innerHTML = isError ? `<span class="error">${msg}</span>` : msg;
+  }
+
+  function setBusy(isBusy, message){
+    setStatus(message || '');
+    btnStart.disabled = isBusy || !recog;
+    btnTextSubmit.disabled = isBusy;
+    textInput.disabled = isBusy;
+
+    // クリア/▼は常に押せる
+    btnClear.disabled = false;
+    btnDropdown.disabled = false;
+  }
+
+  function resetOutputs(){
+    candidateListEl.innerHTML = '';
+    answerEl.textContent = '';
+  }
+
+  function hideSuggestions(){
+    suggestionsEl.classList.add('hidden');
+    suggestionsEl.innerHTML = '';
+    suggestItems = [];
+    activeSuggestIndex = -1;
+  }
+
+  function clearAll(message='準備完了'){
+    try { recog && (recog.abort?.()); } catch (_) {}
+    textInput.value = '';
+    transcriptEl.textContent = '';
+    resetOutputs();
+    hideSuggestions();
+    candidateListEl._cands = [];
+    setStatus(message);
+  }
+
+  btnClear.onclick = () => clearAll('クリアしました');
+
+  // --- speech recognition ---
+  if (!recog){
+    btnStart.disabled = true;
+    setStatus('音声認識が利用できません（Chrome / Edge 推奨）。', true);
+  } else {
+    recog.lang = 'ja-JP';
+    recog.interimResults = false;
+    recog.maxAlternatives = 1;
+
+    recog.onstart = () => setBusy(true, '音声認識開始。話してください…');
+    recog.onerror = (e) => setBusy(false, `認識エラー: ${e.error}`);
+    recog.onend = () => setBusy(false, '音声認識終了。');
+
+    recog.onresult = (e) => {
+      const text = (e.results?.[0]?.[0]?.transcript || '').trim();
       transcriptEl.textContent = text;
-      fetchCandidates(text);
+      resetOutputs();
+      hideSuggestions();
+      if (text) fetchCandidates(text);
+      else setStatus('音声入力が空でした。');
     };
   }
 
   btnStart.onclick = () => {
-    answerEl.textContent = '';
-    candidateListEl.innerHTML = '';
+    if (!recog) return;
     transcriptEl.textContent = '';
-    statusEl.textContent = '音声認識準備中…';
-    recog && recog.start();
+    resetOutputs();
+    hideSuggestions();
+    setBusy(true, '音声認識準備中…');
+    try { recog.start(); } catch { setBusy(false, '音声認識を開始できませんでした。'); }
   };
 
+  // --- search button ---
   btnTextSubmit.onclick = () => {
     const val = textInput.value.trim();
-    if (!val) {
-      alert('文字を入力してください');
+
+    // 空Enter/空検索はクリアにする
+    if (!val){
+      clearAll('入力が空なのでクリアしました');
       return;
     }
-    answerEl.textContent = '';
-    candidateListEl.innerHTML = '';
+
+    hideSuggestions();
     transcriptEl.textContent = val;
-    statusEl.textContent = '候補取得中…';
+    resetOutputs();
     fetchCandidates(val);
   };
 
-  async function fetchCandidates(inputText) {
-    candidateListEl.innerHTML = '';
-    answerEl.textContent = '';
-    try {
+  // --- Enter / Arrow / Escape ---
+  textInput.addEventListener('keydown', (e) => {
+    if (e.isComposing) return;
+
+    const open = !suggestionsEl.classList.contains('hidden');
+
+    if (open && (e.key === 'ArrowDown' || e.key === 'ArrowUp')){
+      e.preventDefault();
+      const max = suggestItems.length - 1;
+      if (max < 0) return;
+
+      if (e.key === 'ArrowDown'){
+        setActiveSuggestion(activeSuggestIndex < max ? activeSuggestIndex + 1 : 0);
+      } else {
+        setActiveSuggestion(activeSuggestIndex > 0 ? activeSuggestIndex - 1 : max);
+      }
+      return;
+    }
+
+    if (e.key === 'Enter'){
+      e.preventDefault();
+
+      // dropdown開いていて選択中があればそれを確定
+      if (open && activeSuggestIndex >= 0){
+        selectSuggestion(activeSuggestIndex);
+        return;
+      }
+
+      // それ以外は検索（空ならクリア）
+      btnTextSubmit.click();
+      return;
+    }
+
+    if (e.key === 'Escape'){
+      hideSuggestions();
+    }
+  });
+
+  // --- fetch candidates from /ask-text ---
+  async function fetchCandidates(inputText){
+    const mySeq = ++fetchSeq;
+    setBusy(true, '候補取得中…');
+
+    try{
       const res = await fetch('/ask-text', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: inputText })
       });
-      if (!res.ok) throw new Error('通信失敗: ' + res.status);
-      const data = await res.json();
-      if (data.error) {
-        statusEl.textContent = 'エラー: ' + data.error;
-        return;
-      }
-      if (!data.candidates || data.candidates.length === 0) {
-        statusEl.textContent = '候補が見つかりませんでした。もう一度試してください。';
-        return;
-      }
-      statusEl.textContent = '候補を表示しています。感染症名を選択してください。';
+      const data = await res.json().catch(() => ({}));
+      if (mySeq !== fetchSeq) return; // stale
 
-      data.candidates.forEach((cand) => {
-        const btn = document.createElement('button');
-        btn.textContent = `${cand.disease}（距離:${cand.distance}）`;
-        btn.onclick = () => showAnswer(cand.answer, cand.disease);
-        candidateListEl.appendChild(btn);
-      });
-    } catch (e) {
-      statusEl.textContent = '通信エラー: ' + e.message;
+      if (!res.ok || data.error){
+        setStatus(`エラー: ${data.error || res.status}`, true);
+        setBusy(false, '');
+        return;
+      }
+
+      const cands = data.candidates || [];
+      if (!cands.length){
+        setStatus('候補が見つかりませんでした。別の表現でお試しください。');
+        setBusy(false, '');
+        return;
+      }
+
+      setStatus('候補を表示しました。感染症名を選択してください。');
+      renderCandidates(cands);
+      selectCandidate(0);
+      setBusy(false, '');
+
+    } catch(e){
+      if (mySeq !== fetchSeq) return;
+      setStatus(`通信エラー: ${e.message}`, true);
+      setBusy(false, '');
     }
   }
 
-  function showAnswer(text, diseaseName) {
-    answerEl.textContent = text;
-    statusEl.textContent = `「${diseaseName}」の治療期間回答を表示中`;
+  function renderCandidates(cands){
+    candidateListEl.innerHTML = '';
+    cands.forEach((cand, idx) => {
+      const btn = document.createElement('button');
+      btn.setAttribute('data-idx', String(idx));
+      btn.textContent = cand.disease;
+      btn.onclick = () => selectCandidate(idx);
+      candidateListEl.appendChild(btn);
+    });
+    candidateListEl._cands = cands;
   }
+
+  function selectCandidate(idx){
+    const cands = candidateListEl._cands || [];
+    if (!cands[idx]) return;
+
+    Array.from(candidateListEl.querySelectorAll('button')).forEach(b => b.classList.remove('selected'));
+    const btn = candidateListEl.querySelector(`button[data-idx="${idx}"]`);
+    if (btn) btn.classList.add('selected');
+
+    const cand = cands[idx];
+    answerEl.textContent = cand.answer || '';
+    setStatus(`「${cand.disease}」の回答を表示中`);
+  }
+
+  // --- dropdown: show ALL diseases (A列) on ▼ ---
+  btnDropdown.addEventListener('mousedown', (e) => {
+    // クリックでinputがblurして閉じる事故を防ぐ
+    e.preventDefault();
+  });
+
+  btnDropdown.onclick = async () => {
+    textInput.focus();
+
+    // トグル：開いてたら閉じる
+    if (!suggestionsEl.classList.contains('hidden')){
+      hideSuggestions();
+      return;
+    }
+
+    // cacheがなければ /diseases から取得
+    if (!allDiseasesCache){
+      setBusy(true, '疾患一覧を取得中…');
+      try{
+        const res = await fetch('/diseases', { method: 'GET' });
+        const data = await res.json().catch(() => ({}));
+
+        if (!res.ok || data.error){
+          setStatus(`エラー: ${data.error || res.status}`, true);
+          setBusy(false, '');
+          return;
+        }
+        allDiseasesCache = (data.diseases || []).filter(Boolean);
+      } catch(e){
+        setStatus(`通信エラー: ${e.message}`, true);
+        setBusy(false, '');
+        return;
+      }
+      setBusy(false, '準備完了');
+    }
+
+    // 全件表示（A列のみ）
+    renderSuggestions(allDiseasesCache);
+  };
+
+  function renderSuggestions(items){
+    suggestItems = items || [];
+    suggestionsEl.innerHTML = '';
+
+    if (!suggestItems.length){
+      hideSuggestions();
+      return;
+    }
+
+    // 大量件数でも比較的マシになるよう fragment で追加
+    const frag = document.createDocumentFragment();
+    suggestItems.forEach((name, idx) => {
+      const div = document.createElement('div');
+      div.className = 'suggestion-item';
+      div.setAttribute('role', 'option');
+      div.setAttribute('data-idx', String(idx));
+      div.textContent = name;
+
+      // mousedown: blurで閉じる前に選択確定
+      div.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        selectSuggestion(idx);
+      });
+
+      frag.appendChild(div);
+    });
+
+    suggestionsEl.appendChild(frag);
+    suggestionsEl.classList.remove('hidden');
+    activeSuggestIndex = -1;
+  }
+
+  function setActiveSuggestion(idx){
+    const nodes = Array.from(suggestionsEl.querySelectorAll('.suggestion-item'));
+    nodes.forEach(n => n.classList.remove('active'));
+
+    activeSuggestIndex = idx;
+    if (idx >= 0 && nodes[idx]){
+      nodes[idx].classList.add('active');
+      nodes[idx].scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  function selectSuggestion(idx){
+    const name = suggestItems[idx];
+    if (!name) return;
+    textInput.value = name;
+    hideSuggestions();
+    btnTextSubmit.click();
+  }
+
+  // 外側クリック/blurで閉じる
+  textInput.addEventListener('blur', () => setTimeout(hideSuggestions, 120));
+  document.addEventListener('click', (e) => {
+    const wrap = document.querySelector('.input-wrap');
+    if (wrap && !wrap.contains(e.target)) hideSuggestions();
+  });
 </script>
 </body>
 </html>

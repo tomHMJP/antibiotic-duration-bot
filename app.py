@@ -1,93 +1,249 @@
-from flask import Flask, request, jsonify, render_template
-from flask_cors import CORS
-import pandas as pd
-from Levenshtein import distance
+# app.py
+from __future__ import annotations
+
 import os
+import unicodedata
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
+import pandas as pd
+from flask import Flask, jsonify, render_template, request
+from flask_cors import CORS
+from Levenshtein import distance as levenshtein_distance
+
+# -----------------------------
+# App / configuration
+# -----------------------------
 app = Flask(__name__)
-CORS(app)
 
-CSV_PATH = '感染症の治療期間.csv'  # ファイル名を正しく指定
-TOP_N_CANDIDATES = 5
+# Same-origin前提のローカル利用が基本。必要なら環境変数でHOSTを0.0.0.0に。
+# /diseases もフロントから叩くのでCORS対象に含める
+CORS(
+    app,
+    resources={
+        r"/ask-text": {"origins": [r"http://127\.0\.0\.1:\d+", r"http://localhost:\d+"]},
+        r"/diseases": {"origins": [r"http://127\.0\.0\.1:\d+", r"http://localhost:\d+"]},
+        r"/health": {"origins": [r"http://127\.0\.0\.1:\d+", r"http://localhost:\d+"]},
+    },
+)
 
-if not os.path.exists(CSV_PATH):
-    raise FileNotFoundError(f"CSVファイルが存在しません: {CSV_PATH}")
+BASE_DIR = Path(__file__).resolve().parent
 
-# CSVファイルを1行目をヘッダーとして読み込み
-df = pd.read_csv(CSV_PATH, header=0)
-df.columns = df.columns.str.strip()  # カラム名の前後空白削除
+DEFAULT_CSV_NAME = "感染症の治療期間.csv"
+CSV_PATH = Path(os.getenv("ABX_DATA_CSV", str(BASE_DIR / DEFAULT_CSV_NAME)))
 
-print("読み込んだカラム名：", df.columns.tolist())
+TOP_N_CANDIDATES = int(os.getenv("TOP_N_CANDIDATES", "5"))
+HOST = os.getenv("HOST", "127.0.0.1")  # 外部アクセス不要なら127.0.0.1推奨
+PORT = int(os.getenv("PORT", "5001"))
 
-# CSVのヘッダー名に合わせて指定
-col_patient = '疾患/病態'
-col_period = '推奨期間'
-col_remarks = '備考'
+# 受け入れる列名（表記ゆれ吸収）
+ALIASES = {
+    "disease": ["疾患/病態", "患者/病名", "病名", "疾患名", "感染症名"],
+    "period": ["推奨期間", "治療期間", "推奨治療期間", "期間"],
+    "remarks": ["備考", "注記", "コメント", "メモ", "備考欄"],
+}
 
-# 必須カラムの存在チェック
-for col in [col_patient, col_period, col_remarks]:
-    if col not in df.columns:
-        raise ValueError(f"CSVに '{col}' カラムが存在しません。カラム名を再確認してください。")
+# -----------------------------
+# Dataset (lazy load)
+# -----------------------------
+DISEASE_LIST: List[str] = []
+DISEASE_DICT: Dict[str, Dict[str, str]] = {}
+RESOLVED_COLS: Tuple[str, str, str] | None = None
+DATASET_ERROR: str | None = None
 
-# 疾患リストと辞書を作成
-disease_list = df[col_patient].dropna().tolist()
 
-disease_dict = {}
-for _, row in df.iterrows():
-    disease = row[col_patient]
-    if pd.isna(disease):
-        continue
-    period = str(row[col_period]) if not pd.isna(row[col_period]) else ''
-    remarks = str(row[col_remarks]) if not pd.isna(row[col_remarks]) else ''
-    disease_dict[disease] = {'period': period, 'remarks': remarks}
+def _normalize_text(s: str) -> str:
+    """
+    NFKCで正規化（全角/半角などを寄せる）し、空白除去、lower化。
+    """
+    s = "" if s is None else str(s)
+    s = unicodedata.normalize("NFKC", s)
+    return s.strip().lower()
 
-def suggest_diseases_partial(user_text, top_n=TOP_N_CANDIDATES):
-    user_text_lower = user_text.lower()
-    matched_diseases = []
-    for disease in disease_list:
-        if user_text_lower in disease.lower():
-            matched_diseases.append(disease)
-    # 部分一致候補が足りなければLevenshtein距離で補う
-    if len(matched_diseases) == 0:
-        scored = []
-        for disease in disease_list:
-            dist = distance(user_text_lower, disease.lower())
+
+def _read_csv_with_fallback(path: Path) -> pd.DataFrame:
+    """
+    日本語CSVでありがちな文字コードを順に試行。
+    """
+    encodings = ["utf-8-sig", "utf-8", "cp932", "shift_jis"]
+    last_err: Optional[Exception] = None
+    for enc in encodings:
+        try:
+            return pd.read_csv(path, header=0, encoding=enc)
+        except Exception as e:
+            last_err = e
+    raise RuntimeError(f"CSVの読み込みに失敗: {path} / 最後のエラー: {last_err}")
+
+
+def _resolve_column(df: pd.DataFrame, logical: str) -> str:
+    df.columns = df.columns.astype(str).str.strip()
+    for cand in ALIASES[logical]:
+        if cand in df.columns:
+            return cand
+    raise ValueError(
+        f"CSVに必要なカラム '{logical}' が見つかりません。"
+        f"想定候補={ALIASES[logical]} / 実際のカラム={df.columns.tolist()}"
+    )
+
+
+def _ensure_dataset_loaded() -> None:
+    """
+    例外でプロセスを落とさないために遅延ロード＋エラー保持。
+    """
+    global DISEASE_LIST, DISEASE_DICT, RESOLVED_COLS, DATASET_ERROR
+
+    if DISEASE_LIST or DISEASE_DICT or RESOLVED_COLS or DATASET_ERROR:
+        return
+
+    try:
+        if not CSV_PATH.exists():
+            raise FileNotFoundError(f"CSVが存在しません: {CSV_PATH}")
+
+        df = _read_csv_with_fallback(CSV_PATH)
+
+        col_disease = _resolve_column(df, "disease")
+        col_period = _resolve_column(df, "period")
+        col_remarks = _resolve_column(df, "remarks")
+
+        tmp_dict: Dict[str, Dict[str, str]] = {}
+        for _, row in df.iterrows():
+            raw = row.get(col_disease)
+            if pd.isna(raw):
+                continue
+            disease = str(raw).strip()
+            if not disease:
+                continue
+
+            period = row.get(col_period)
+            remarks = row.get(col_remarks)
+
+            tmp_dict[disease] = {
+                "period": "" if pd.isna(period) else str(period).strip(),
+                "remarks": "" if pd.isna(remarks) else str(remarks).strip(),
+            }
+
+        DISEASE_DICT = tmp_dict
+        DISEASE_LIST = sorted(tmp_dict.keys())
+        RESOLVED_COLS = (col_disease, col_period, col_remarks)
+
+        print("CSV読み込み:", CSV_PATH)
+        print("解決したカラム:", RESOLVED_COLS)
+        print("登録疾患数:", len(DISEASE_LIST))
+
+    except Exception as e:
+        DATASET_ERROR = str(e)
+        print("DATASET ERROR:", DATASET_ERROR)
+
+
+# -----------------------------
+# Search / answer
+# -----------------------------
+def _rank_candidates(query: str, top_n: int = TOP_N_CANDIDATES) -> List[Tuple[str, int]]:
+    _ensure_dataset_loaded()
+    if DATASET_ERROR:
+        return []
+
+    q = _normalize_text(query)
+    if not q:
+        return []
+
+    substring_hits: List[Tuple[str, int]] = []
+    scored: List[Tuple[str, int]] = []
+
+    for disease in DISEASE_LIST:
+        d_norm = _normalize_text(disease)
+        dist = levenshtein_distance(q, d_norm)
+        if q in d_norm:
+            substring_hits.append((disease, dist))
+        else:
             scored.append((disease, dist))
-        scored.sort(key=lambda x: x[1])
-        return [d[0] for d in scored[:top_n]]
-    else:
-        return matched_diseases[:top_n]
 
-def generate_answer(disease):
-    data = disease_dict.get(disease)
-    if not data:
-        return "該当感染症の情報がありません。"
-    ans = f"【{disease}】の推奨治療期間は {data['period']} です。"
-    if data['remarks']:
-        ans += f"\nマニュアル引用: 「{disease}: {data['period']} {data['remarks']}」"
-    return ans
+    if substring_hits:
+        substring_hits.sort(key=lambda x: x[1])
+        return substring_hits[:top_n]
 
-@app.route('/')
+    scored.sort(key=lambda x: x[1])
+    return scored[:top_n]
+
+
+def _format_answer(disease: str) -> str:
+    info = DISEASE_DICT.get(disease)
+    if not info:
+        return "該当する情報がありません。"
+
+    period = info.get("period", "")
+    remarks = info.get("remarks", "")
+
+    lines = [f"", f"推奨治療期間：{period if period else '（記載なし）'}"]
+    if remarks:
+        lines.append(f"備考：{remarks}")
+    return "\n".join(lines)
+
+
+# -----------------------------
+# Routes
+# -----------------------------
+@app.route("/")
 def index():
-    return render_template('index.html')
+    return render_template("index.html")
 
-@app.route('/ask-text', methods=['POST'])
+
+@app.route("/health")
+def health():
+    _ensure_dataset_loaded()
+    return jsonify(
+        {
+            "csv_path": str(CSV_PATH),
+            "loaded": bool(DISEASE_LIST) and not bool(DATASET_ERROR),
+            "n_diseases": len(DISEASE_LIST),
+            "resolved_cols": RESOLVED_COLS,
+            "error": DATASET_ERROR,
+        }
+    )
+
+
+# ★ 追加：A列（疾患名）を全件返す
+@app.route("/diseases", methods=["GET"])
+def diseases():
+    _ensure_dataset_loaded()
+    if DATASET_ERROR:
+        return jsonify({"error": DATASET_ERROR}), 500
+
+    # 既にユニーク&ソート済み（DISEASE_LIST）だが、念のため空文字を除外
+    diseases_list = [d for d in DISEASE_LIST if isinstance(d, str) and d.strip()]
+    return jsonify({"diseases": diseases_list, "n_diseases": len(diseases_list)})
+
+
+@app.route("/ask-text", methods=["POST"])
 def ask_text():
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "JSONが送信されていません"}), 400
-    text = data.get('text', '').strip()
+    _ensure_dataset_loaded()
+    if DATASET_ERROR:
+        return jsonify({"error": DATASET_ERROR}), 500
+
+    data = request.get_json(silent=True) or {}
+    text = str(data.get("text", "")).strip()
     if not text:
         return jsonify({"error": "テキストが空です"}), 400
 
-    candidates = suggest_diseases_partial(text)
-    answers = []
-    for disease in candidates:
-        answer = generate_answer(disease)
-        answers.append({"disease": disease, "answer": answer})
+    ranked = _rank_candidates(text)
+    candidates = []
+    for disease, dist in ranked:
+        info = DISEASE_DICT.get(disease, {})
+        candidates.append(
+            {
+                "disease": disease,
+                "distance": dist,
+                "period": info.get("period", ""),
+                "remarks": info.get("remarks", ""),
+                "answer": _format_answer(disease),
+            }
+        )
 
-    return jsonify({"candidates": answers})
+    return jsonify({"input": text, "candidates": candidates})
 
-if __name__ == '__main__':
-    print("Flaskサーバー起動: http://localhost:5001")
-    app.run(host='0.0.0.0', port=5001)
+
+if __name__ == "__main__":
+    _ensure_dataset_loaded()
+    print(f"Flaskサーバー起動: http://{HOST}:{PORT}")
+    # threaded=True はローカル用途で十分。外部公開はWSGI推奨。
+    app.run(host=HOST, port=PORT, threaded=True)
