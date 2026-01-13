@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>抗菌薬治療期間Bot 音声＋文字入力対応（動作確認版）</title>
+<style>
+  /* 省略せず、前回のCSSをそのまま使ってください */
+  body { font-family: Arial, sans-serif; margin: 2em; background: #fafafa; }
+  button, input[type="text"] {
+    font-size: 1.2em;
+    padding: 0.5em 1em;
+    margin: 0.2em 0;
+  }
+  #status { margin-top: 1em; font-weight: bold; color: #333; }
+  #transcript, #answer { margin-top: 1em; white-space: pre-wrap; background: #fff; padding: 1em; border-radius: 5px; border: 1px solid #ddd; min-height: 4em; }
+  #candidate-list { margin-top: 1em; }
+  #candidate-list button {
+    margin: 0.2em 0;
+    width: 100%;
+    text-align: left;
+    padding: 0.5em;
+    border: 1px solid #ccc;
+    background: #eee;
+    cursor: pointer;
+    border-radius: 4px;
+  }
+  #candidate-list button:hover { background: #ddd; }
+</style>
+</head>
+<body>
+<h1>抗菌薬治療期間Bot</h1>
+<p>音声または文字で感染症名を入力し、あいまい検索で候補を提示します。候補を選択すると治療期間の回答を表示します。</p>
+
+<button id="btnStart">音声入力開始</button>
+<br />
+<input type="text" id="textInput" placeholder="ここに文字を入力してください" style="width:100%; max-width:500px;" />
+<button id="btnTextSubmit">文字で検索</button>
+
+<p id="status">準備完了</p>
+
+<h3>入力テキスト</h3>
+<div id="transcript"></div>
+
+<h3>候補感染症一覧（選択してください）</h3>
+<div id="candidate-list"></div>
+
+<h3>選択された感染症の治療期間・回答</h3>
+<div id="answer"></div>
+
+<script>
+  window.SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const recog = window.SpeechRecognition ? new window.SpeechRecognition() : null;
+  if (!recog) {
+    alert('お使いのブラウザは音声認識をサポートしていません。ChromeやEdgeの最新版でご利用ください。');
+  }
+
+  if (recog) {
+    recog.lang = 'ja-JP';
+    recog.interimResults = false;
+    recog.maxAlternatives = 1;
+  }
+
+  const btnStart = document.getElementById('btnStart');
+  const btnTextSubmit = document.getElementById('btnTextSubmit');
+  const textInput = document.getElementById('textInput');
+  const statusEl = document.getElementById('status');
+  const transcriptEl = document.getElementById('transcript');
+  const candidateListEl = document.getElementById('candidate-list');
+  const answerEl = document.getElementById('answer');
+
+  if (recog) {
+    recog.onstart = () => {
+      statusEl.textContent = '音声認識開始。話してください…';
+      btnStart.disabled = true;
+      btnTextSubmit.disabled = true;
+      textInput.disabled = true;
+    };
+    recog.onerror = e => {
+      statusEl.textContent = `認識エラー: ${e.error}`;
+      btnStart.disabled = false;
+      btnTextSubmit.disabled = false;
+      textInput.disabled = false;
+    };
+    recog.onend = () => {
+      statusEl.textContent = '音声認識終了。';
+      btnStart.disabled = false;
+      btnTextSubmit.disabled = false;
+      textInput.disabled = false;
+    };
+    recog.onresult = e => {
+      const text = e.results[0][0].transcript.trim();
+      transcriptEl.textContent = text;
+      fetchCandidates(text);
+    };
+  }
+
+  btnStart.onclick = () => {
+    answerEl.textContent = '';
+    candidateListEl.innerHTML = '';
+    transcriptEl.textContent = '';
+    statusEl.textContent = '音声認識準備中…';
+    recog && recog.start();
+  };
+
+  btnTextSubmit.onclick = () => {
+    const val = textInput.value.trim();
+    if (!val) {
+      alert('文字を入力してください');
+      return;
+    }
+    answerEl.textContent = '';
+    candidateListEl.innerHTML = '';
+    transcriptEl.textContent = val;
+    statusEl.textContent = '候補取得中…';
+    fetchCandidates(val);
+  };
+
+  async function fetchCandidates(inputText) {
+    candidateListEl.innerHTML = '';
+    answerEl.textContent = '';
+    try {
+      const res = await fetch('/ask-text', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: inputText })
+      });
+      if (!res.ok) throw new Error('通信失敗: ' + res.status);
+      const data = await res.json();
+      if (data.error) {
+        statusEl.textContent = 'エラー: ' + data.error;
+        return;
+      }
+      if (!data.candidates || data.candidates.length === 0) {
+        statusEl.textContent = '候補が見つかりませんでした。もう一度試してください。';
+        return;
+      }
+      statusEl.textContent = '候補を表示しています。感染症名を選択してください。';
+
+      data.candidates.forEach((cand) => {
+        const btn = document.createElement('button');
+        btn.textContent = `${cand.disease}（距離:${cand.distance}）`;
+        btn.onclick = () => showAnswer(cand.answer, cand.disease);
+        candidateListEl.appendChild(btn);
+      });
+    } catch (e) {
+      statusEl.textContent = '通信エラー: ' + e.message;
+    }
+  }
+
+  function showAnswer(text, diseaseName) {
+    answerEl.textContent = text;
+    statusEl.textContent = `「${diseaseName}」の治療期間回答を表示中`;
+  }
+</script>
+</body>
+</html>
